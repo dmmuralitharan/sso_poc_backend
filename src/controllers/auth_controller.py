@@ -1,84 +1,110 @@
-import datetime
+from datetime import datetime, timezone
 import bcrypt
 from src import db
 from flask import jsonify, request
 from src.models.user_model import User
-from src.utils.jwt import decode_jwt_token, generate_jwt_token
+from src.utils.jwt import generate_jwt_token
 
 
-def register_controller():
-
+def register_user_controller():
     try:
+        firebase_uid = request.headers.get("X-FIREBASE-UID")
+        if not firebase_uid:
+            return jsonify({"error": "Missing Firebase UID"}), 400
 
-        data = request.get_json()
+        data = request.get_json() or {}
+        email = data.get("email")
+        password = data.get("password")  # Will be None for Google signup
+        name = data.get("name")
+        photo_url = data.get("photo_url")
+        provider = data.get("provider")  # "password" or "google"
 
-        username = data.get("username")
-        password = data.get("password")
-        role = data.get("role", "user")
+        if not email:
+            return jsonify({"error": "Email is required"}), 400
 
-        if User.query.filter_by(username=username).first():
-            return jsonify({"msg": "User already exists", "success": 2})
+        # Check if user already exists
+        existing_user = User.query.filter_by(email=email).first()
+        if existing_user:
+            return jsonify({"error": "User already exists"}), 409
 
-        hashed_password = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
+        hashed_password = None
+        if provider == "password":
+            if not password:
+                return jsonify({"error": "Password required"}), 400
+            # Hash password for storage
+            hashed_password = bcrypt.hashpw(
+                password.encode("utf-8"), bcrypt.gensalt()
+            ).decode("utf-8")
 
-        new_user = User(
-            username=username, password=hashed_password.decode("utf-8"), role=role
+        # Create user
+        user = User(
+            firebase_uid=firebase_uid,
+            email=email,
+            password=hashed_password,
+            name=name,
+            photo_url=photo_url,
+            role="user",
         )
 
-        db.session.add(new_user)
+        db.session.add(user)
         db.session.commit()
 
-        return jsonify({"msg": "User registered successfully", "status": 1}), 201
-
+        return (
+            jsonify(
+                {
+                    "message": "User registered successfully",
+                    "status": 1,
+                    # "user": {
+                    #     # "id": user.id,
+                    #     # "email": user.email,
+                    #     "firebase_uid": user.firebase_uid,
+                    #     # "name": user.name,
+                    #     # "photo_url": user.photo_url,
+                    #     # "role": user.role,
+                    #     # "provider": provider,
+                    # },
+                }
+            ),
+            201,
+        )
     except Exception as e:
         db.session.rollback()
         return (jsonify({"success": 0, "error": str(e)}), 500)
 
 
-def login_controller():
-
+def login_user_controller():
     try:
+        firebase_uid = request.headers.get("X-FIREBASE-UID")
 
-        data = request.get_json()
+        if not firebase_uid:
+            return jsonify({"error": "Missing Firebase UID"}), 400
 
-        username = data.get("username")
-        password = data.get("password")
+        # Find user in DB
+        user = User.query.filter_by(firebase_uid=firebase_uid).first()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
 
-        if not username or not password:
-            return (
-                jsonify({"message": "Username and password required", "status": 0}),
-                400,
-            )
-
-        user = User.query.filter_by(username=username).first()
-
-        if not user or not bcrypt.checkpw(
-            password.encode("utf-8"), user.password.encode("utf-8")
-        ):
-            return jsonify({"message": "Invalid credentials", "status": 0})
-
-        additional_claims = {
-            "user_id": user.id,
-            "username": user.username,
-            "role": user.role,
-        }
-
-        access_token = generate_jwt_token(user.id)
-        refresh_token = generate_jwt_token(user.id, is_refresh=True)
-
-        user.refresh_token = refresh_token
-        user.refresh_token_created_at = datetime.datetime.utcnow()
+        # Update last_login
+        user.last_login = datetime.now(timezone.utc)
         db.session.commit()
+
+        # Create JWT
+        access_token = generate_jwt_token({"user_id": user.id, firebase_uid: firebase_uid})
 
         return (
             jsonify(
                 {
                     "message": "Login successful",
                     "access_token": access_token,
-                    "refresh_token": refresh_token,
-                    "username": user.username,
-                    "role": user.role,
-                    "status": 1,
+                    "user": {
+                        "id": str(user.id),
+                        "firebase_uid": firebase_uid,
+                        "email": user.email,
+                        "name": user.name,
+                        "photo_url": user.photo_url,
+                        "provider": user.provider,
+                        "role": user.role,
+                    },
                 }
             ),
             200,
@@ -89,42 +115,25 @@ def login_controller():
         return (jsonify({"success": 0, "error": str(e)}), 500)
 
 
-def token_refresh_controller():
-
+def fetch_user_by_uid_controller():
     try:
-
-        refresh_token = request.headers.get("Authorization")
-        if not refresh_token or not refresh_token.startswith("Bearer "):
-            return (
-                jsonify({"message": "Refresh token missing or invalid", "status": 0}),
-                400,
-            )
-
-        refresh_token = refresh_token.split(" ")[1]
-
-        identity = decode_jwt_token(refresh_token)
-        user = User.query.filter_by(id=identity["user_id"]).first()
-
+        uid = request.firebase_uid
+        user = User.query.filter_by(firebase_uid=uid).first()
         if not user:
-            return jsonify({"message": "User not found", "status": 0}), 404
-
-        if refresh_token != user.refresh_token:
-            return jsonify({"message": "Invalid refresh token", "status": 0}), 401
-
-        new_access_token = generate_jwt_token(user.id)
-        new_refresh_token = generate_jwt_token(user.id, is_refresh=True)
-
-        user.refresh_token = new_refresh_token
-        user.token_created_at = datetime.datetime.utcnow()
-        db.session.commit()
+            return jsonify({"error": "User not found"}), 404
 
         return (
             jsonify(
                 {
-                    "message": "Access token refreshed",
-                    "access_token": new_access_token,
-                    "refresh_token": new_refresh_token,
-                    "status": 1,
+                    "user": {
+                        "id": user.id,
+                        "email": user.email,
+                        "firebase_uid": user.firebase_uid,
+                        "name": user.name,
+                        "photo_url": user.photo_url,
+                        "role": user.role,
+                        "provider": user.provider,
+                    }
                 }
             ),
             200,

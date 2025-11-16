@@ -1,23 +1,23 @@
 from flask import request, jsonify, current_app
 import jwt
-import datetime
+from datetime import datetime, timezone, timedelta
 import bcrypt
 from functools import wraps
 
-SECRET_KEY = 'bB@&2VbxD!yT5q!lKj*Wn?I}5M6xZ$@^'
+SECRET_KEY = "bB@&2VbxD!yT5q!lKj*Wn?I}5M6xZ$@^"
 ALGORITHM = "HS256"
 
 
-def generate_jwt_token(userid, is_refresh=False):
-    expiration = datetime.datetime.utcnow() + (
-        datetime.timedelta(days=7) if is_refresh else datetime.timedelta(seconds=30)
+def generate_jwt_token(payload_data: dict, is_refresh=False):
+    expiration = datetime.now(timezone.utc) + (
+        timedelta(days=7) if is_refresh else timedelta(seconds=30)
     )
 
     payload = {
-        "user_id": userid,
+        **payload_data,
         "type": "refresh" if is_refresh else "access",
         "exp": expiration,
-        "iat": datetime.datetime.utcnow(),
+        "iat": datetime.now(timezone.utc),
     }
 
     token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
